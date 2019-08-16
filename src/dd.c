@@ -37,6 +37,13 @@
 #include "xstrtol.h"
 #include "xtime.h"
 
+#include "subzero.h"
+#include <assert.h>
+
+#define __SZ_DEBUG 0
+#define __SZ_IS_PUNCH 1
+#define __SZ_ENABLED 1
+
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "dd"
 
@@ -94,8 +101,13 @@
 /* How many bytes to add to the input and output block sizes before invoking
    malloc.  See dd_copy for details.  INPUT_BLOCK_SLOP must be no less than
    OUTPUT_BLOCK_SLOP.  */
+#if __SZ_ENABLED == 0
 #define INPUT_BLOCK_SLOP (2 * SWAB_ALIGN_OFFSET + 2 * page_size - 1)
 #define OUTPUT_BLOCK_SLOP (page_size - 1)
+#else
+#define INPUT_BLOCK_SLOP 0
+#define OUTPUT_BLOCK_SLOP 0
+#endif
 
 /* Maximum blocksize for the given SLOP.
    Keep it smaller than SIZE_MAX - SLOP, so that we can
@@ -244,9 +256,16 @@ static char space_character = ' ';
 
 /* Input buffer. */
 static char *ibuf;
+static PMEM_BLOCK *pm_ibuf;
+static HYBRID_BUF *pm_patch_ibuf;
 
 /* Output buffer. */
 static char *obuf;
+static PMEM_BLOCK *pm_obuf;
+static HYBRID_BUF *pm_patch_obuf;
+
+/* Subzero */
+static uintmax_t __sz_w_bytes = 0;
 
 /* Current index into 'obuf'. */
 static size_t oc = 0;
@@ -274,6 +293,8 @@ static ssize_t (*iread_fnc) (int fd, char *buf, size_t size);
 
 /* A longest symbol in the struct symbol_values tables below.  */
 #define LONGEST_SYMBOL "count_bytes"
+
+// static size_t total_written = 0;
 
 /* A symbol and the corresponding integer value.  */
 struct symbol_value
@@ -690,6 +711,7 @@ enum { human_opts = (human_autoscale | human_round_to_nearest
 static void
 alloc_ibuf (void)
 {
+  if(__SZ_DEBUG) fprintf(stderr, "%s\n", __func__);
   if (ibuf)
     return;
 
@@ -710,11 +732,62 @@ alloc_ibuf (void)
   ibuf = ptr_align (real_buf, page_size);
 }
 
+/* Ensure input pmem buffer IBUF is allocated.  */
+
+static void
+alloc_pmem_ibuf (void)
+{
+  if(__SZ_DEBUG) fprintf(stderr, "%s\n", __func__);
+  int ret;
+  // if (pm_ibuf)
+  if (pm_patch_ibuf)
+    return;
+
+  // char *real_buf = malloc (input_blocksize + INPUT_BLOCK_SLOP);
+
+  // YJ: punch and move version
+  // YJ: We don't add OUTPUT_BLOCK_SLOP
+  // pm_ibuf = (PMEM_BLOCK *) malloc(sizeof(PMEM_BLOCK));
+  // ret = __sz_punch(pm_ibuf, output_blocksize + OUTPUT_BLOCK_SLOP, __SZ_IS_PUNCH);
+
+  // YJ: pathc buffer version
+  pm_patch_ibuf = (HYBRID_BUF *) malloc(sizeof(HYBRID_BUF));
+  ret = __sz_alloc_hbuf(pm_patch_ibuf, __sz_w_bytes, output_blocksize);
+
+  // pm_patch_ibuf = (HYBRID_BUF *) malloc(sizeof(HYBRID_BUF));
+  // __sz_alloc_hbuf(pm_patch_ibuf, INPUT_BLOCK_SLOP, input_blocksize + INPUT_BLOCK_SLOP);
+
+  if (ret == -1)
+    {
+      uintmax_t ibs = input_blocksize;
+      char hbuf[LONGEST_HUMAN_READABLE + 1];
+      die (EXIT_FAILURE, 0,
+           _("memory exhausted by input buffer of size %"PRIuMAX" bytes (%s)"),
+           ibs,
+           human_readable (input_blocksize, hbuf,
+                           human_opts | human_base_1024, 1, 1));
+    }
+
+  // char *real_buf = pm_ibuf->buf;
+  char *real_buf = pm_patch_ibuf->mid.buf;
+
+  // YJ: We will not support SWAB
+  // real_buf += SWAB_ALIGN_OFFSET;	/* allow space for swab */
+
+  ibuf = ptr_align (real_buf, page_size);
+
+  // YJ: This should pass because of the following reasons.
+  // 1. subzero allocator return page_aligned addr
+  // 2. We don't support SWAB and thus not add space for SWAB
+  assert(ibuf == real_buf);
+}
+
 /* Ensure output buffer OBUF is allocated/initialized.  */
 
 static void
 alloc_obuf (void)
 {
+  if(__SZ_DEBUG) fprintf(stderr, "%s\n", __func__);
   if (obuf)
     return;
 
@@ -739,6 +812,53 @@ alloc_obuf (void)
     {
       alloc_ibuf ();
       obuf = ibuf;
+    }
+}
+
+
+/* Ensure output pmem buffer pm_OBUF is allocated/initialized.  */
+
+static void
+alloc_pmem_obuf (void)
+{
+  if(__SZ_DEBUG) fprintf(stderr, "%s\n", __func__);
+  int ret;
+  // if (pm_obuf)
+  if (pm_patch_obuf)
+    return;
+
+  if (conversions_mask & C_TWOBUFS)
+    {
+      // YJ: Dead code if C_TWOBUFS is not set
+      /* Page-align the output buffer, too.  */
+      // char *real_obuf = malloc (output_blocksize + OUTPUT_BLOCK_SLOP);
+
+      // pm_obuf = (PMEM_BLOCK *) malloc(sizeof(PMEM_BLOCK));
+      // ret = __sz_punch(pm_obuf, output_blocksize + OUTPUT_BLOCK_SLOP, __SZ_IS_PUNCH);
+
+      pm_patch_obuf = (HYBRID_BUF *) malloc(sizeof(HYBRID_BUF));
+      ret = __sz_alloc_hbuf(pm_patch_obuf, __sz_w_bytes, output_blocksize);
+      if (ret == -1)
+        {
+          uintmax_t obs = output_blocksize;
+          char hbuf[LONGEST_HUMAN_READABLE + 1];
+          die (EXIT_FAILURE, 0,
+               _("memory exhausted by output buffer of size %"PRIuMAX
+                 " bytes (%s)"),
+               obs,
+               human_readable (output_blocksize, hbuf,
+                               human_opts | human_base_1024, 1, 1));
+        }
+      // char *real_obuf = pm_obuf->buf;
+      char *real_obuf = pm_patch_obuf->mid.buf;
+      obuf = ptr_align (real_obuf, page_size);
+    }
+  else
+    {
+      alloc_pmem_ibuf ();
+      obuf = ibuf;
+      // pm_obuf = pm_ibuf;
+      pm_patch_obuf = pm_patch_ibuf;
     }
 }
 
@@ -1262,6 +1382,115 @@ iwrite (int fd, char const *buf, size_t size)
         }
       else
         total_written += nwritten;
+    }
+
+  if (o_nocache && total_written)
+    invalidate_cache (fd, total_written);
+
+  return total_written;
+}
+
+
+/* Write to FD the buffer BUF of size SIZE, processing any signals
+   that arrive.  Return the number of bytes written, setting errno if
+   this is less than SIZE.  Keep trying if there are partial
+   writes.  */
+
+static size_t
+iwrite_pmem (int fd, char const *buf, size_t size)
+{
+  if(__SZ_DEBUG) fprintf(stderr,"%s\n", __func__);
+  size_t total_written = 0;
+
+  if ((output_flags & O_DIRECT) && size < output_blocksize)
+    {
+      int old_flags = fcntl (STDOUT_FILENO, F_GETFL);
+      if (fcntl (STDOUT_FILENO, F_SETFL, old_flags & ~O_DIRECT) != 0
+          && status_level != STATUS_NONE)
+        error (0, errno, _("failed to turn off O_DIRECT: %s"),
+               quotef (output_file));
+
+      /* Since we have just turned off O_DIRECT for the final write,
+         we try to preserve some of its semantics.  */
+
+      /* Call invalidate_cache to setup the appropriate offsets
+         for subsequent calls.  */
+      o_nocache_eof = true;
+      invalidate_cache (STDOUT_FILENO, 0);
+
+      /* Attempt to ensure that that final block is committed
+         to disk as quickly as possible.  */
+      conversions_mask |= C_FSYNC;
+
+      /* After the subsequent fsync we'll call invalidate_cache
+         to attempt to clear all data from the page cache.  */
+    }
+
+  while (total_written < size)
+    {
+      ssize_t nwritten = 0;
+      process_signals ();
+
+      /* Perform a seek for a NUL block if sparse output is enabled.  */
+      final_op_was_seek = false;
+      if ((conversions_mask & C_SPARSE) && is_nul (buf, size))
+        {
+          if (lseek (fd, size, SEEK_CUR) < 0)
+            {
+              conversions_mask &= ~C_SPARSE;
+              /* Don't warn about the advisory sparse request.  */
+            }
+          else
+            {
+              final_op_was_seek = true;
+              nwritten = size;
+            }
+        }
+
+      if (!nwritten){
+        // nwritten = write (fd, buf + total_written, size - total_written);
+        // int __sz_ret = __sz_move(fd, 0 + total_written, (PMEM_BLOCK *) pm_obuf);
+        int __sz_ret = __sz_patch(fd, pm_patch_obuf);
+        if(__sz_ret != 0) {
+          fprintf(stderr, "[%s] Subzero move failed.\n", __func__);
+          exit(-1);
+        } else {
+          if(__SZ_DEBUG) fprintf(stderr, "[%s] Subzero move successful.\n", __func__);
+        }
+
+        nwritten = pm_patch_obuf->mid.len;
+        // nwritten = pm_obuf->len;
+      }
+
+      if (nwritten < 0)
+        {
+          if (errno != EINTR)
+            break;
+        }
+      else if (nwritten == 0)
+        {
+          /* Some buggy drivers return 0 when one tries to write beyond
+             a device's end.  (Example: Linux kernel 1.2.13 on /dev/fd0.)
+             Set errno to ENOSPC so they get a sensible diagnostic.  */
+          errno = ENOSPC;
+          break;
+        }
+      else {
+        total_written += nwritten;
+        __sz_w_bytes += nwritten;
+
+        // YJ: Invalidate the patched buffer
+        if(__SZ_DEBUG) fprintf(stderr, "[%s] nwritten=%d, total_written=%d, w_bytes=%d\n", __func__, nwritten, total_written, w_bytes);
+        if (pm_patch_ibuf == pm_patch_obuf) {
+          free(pm_patch_ibuf);
+        } else {
+          free(pm_patch_ibuf);
+          free(pm_patch_obuf);
+        }
+        pm_patch_ibuf = NULL;
+        pm_patch_obuf = NULL;
+        alloc_pmem_obuf();
+      }
     }
 
   if (o_nocache && total_written)
@@ -2135,6 +2364,7 @@ set_fd_flags (int fd, int add_flags, char const *name)
 static int
 dd_copy (void)
 {
+  if(__SZ_DEBUG) fprintf(stderr, "%s\n", __func__);
   char *bufstart;		/* Input buffer. */
   ssize_t nread;		/* Bytes read in the current block.  */
 
@@ -2215,8 +2445,13 @@ dd_copy (void)
   if (max_records == 0 && max_bytes == 0)
     return exit_status;
 
-  alloc_ibuf ();
-  alloc_obuf ();
+  if(__SZ_ENABLED) {
+    alloc_pmem_ibuf ();
+    alloc_pmem_obuf ();
+  } else {
+    alloc_ibuf ();
+    alloc_obuf ();
+  }
 
   while (1)
     {
@@ -2230,6 +2465,10 @@ dd_copy (void)
             }
         }
 
+      // YJ: The effect of this (!!variable_name) is that it will transform the
+      // output of that incredibly long-named function into either 1 or 0.
+      // If the return value of the function is greater (or less) than 0,
+      // double NOT will produce 1. If it is 0 then double NOTing it will produce 0.
       if (r_partial + r_full >= max_records + !!max_bytes)
         break;
 
@@ -2320,7 +2559,14 @@ dd_copy (void)
 
       if (ibuf == obuf)		/* If not C_TWOBUFS. */
         {
-          size_t nwritten = iwrite (STDOUT_FILENO, obuf, n_bytes_read);
+          size_t nwritten;
+          if(__SZ_ENABLED) {
+            nwritten = iwrite_pmem(STDOUT_FILENO, obuf, n_bytes_read);
+          } else {
+            nwritten = iwrite (STDOUT_FILENO, obuf, n_bytes_read);
+          }
+
+          // __sz_w_bytes += nwritten;
           w_bytes += nwritten;
           if (nwritten != n_bytes_read)
             {
@@ -2444,6 +2690,14 @@ main (int argc, char **argv)
   int exit_status;
   off_t offset;
 
+  if(__SZ_ENABLED){
+    int __sz_ret = __sz_create_pmem_pool_default();
+    if(__sz_ret != 0) {
+      fprintf(stderr, "Error creating pmem_pool. Abort!\n");
+      exit(-1);
+    }
+  }
+
   install_signal_handlers ();
 
   initialize_main (&argc, &argv);
@@ -2481,6 +2735,7 @@ main (int argc, char **argv)
         die (EXIT_FAILURE, errno, _("failed to open %s"),
              quoteaf (input_file));
     }
+  if(__SZ_DEBUG) fprintf(stderr, "[%s] Successful if setup!\n", __func__);
 
   offset = lseek (STDIN_FILENO, 0, SEEK_CUR);
   input_seekable = (0 <= offset);
@@ -2494,6 +2749,7 @@ main (int argc, char **argv)
     }
   else
     {
+      if(__SZ_DEBUG) fprintf(stderr, "[%s] OF not null\n", __func__);
       mode_t perms = MODE_RW_UGO;
       int opts
         = (output_flags
@@ -2504,6 +2760,7 @@ main (int argc, char **argv)
       /* Open the output file with *read* access only if we might
          need to read to satisfy a 'seek=' request.  If we can't read
          the file, go ahead with write-only access; it might work.  */
+      if(__SZ_DEBUG) fprintf(stderr, "[%s] Of first before die\n", __func__);
       if ((! seek_records
            || ifd_reopen (STDOUT_FILENO, output_file, O_RDWR | opts, perms) < 0)
           && (ifd_reopen (STDOUT_FILENO, output_file, O_WRONLY | opts, perms)
@@ -2511,6 +2768,7 @@ main (int argc, char **argv)
         die (EXIT_FAILURE, errno, _("failed to open %s"),
              quoteaf (output_file));
 
+      if(__SZ_DEBUG) fprintf(stderr, "[%s] Of first die passsed\n", __func__);
       if (seek_records != 0 && !(conversions_mask & C_NOTRUNC))
         {
           uintmax_t size = seek_records * output_blocksize + seek_bytes;
@@ -2545,6 +2803,8 @@ main (int argc, char **argv)
             }
         }
     }
+
+  if(__SZ_DEBUG) fprintf(stderr, "[%s] Successful of setup!\n", __func__);
 
   start_time = gethrxtime ();
   next_time = start_time + XTIME_PRECISION;
