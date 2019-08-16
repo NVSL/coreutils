@@ -1426,8 +1426,8 @@ iwrite_pmem (int fd, char const *buf, size_t size)
          to attempt to clear all data from the page cache.  */
     }
 
-  while (total_written < size)
-    {
+  // while (total_written < size)
+  //   {
       ssize_t nwritten = 0;
       process_signals ();
 
@@ -1462,20 +1462,22 @@ iwrite_pmem (int fd, char const *buf, size_t size)
         // nwritten = pm_obuf->len;
       }
 
-      if (nwritten < 0)
-        {
-          if (errno != EINTR)
-            break;
-        }
-      else if (nwritten == 0)
-        {
+      // if (nwritten < 0)
+        // {
+          // if (errno != EINTR)
+            // break;
+        // }
+      // else if (nwritten == 0)
+      //   {
           /* Some buggy drivers return 0 when one tries to write beyond
              a device's end.  (Example: Linux kernel 1.2.13 on /dev/fd0.)
              Set errno to ENOSPC so they get a sensible diagnostic.  */
-          errno = ENOSPC;
-          break;
-        }
-      else {
+          // errno = ENOSPC;
+          // break;
+        // }
+      // else {
+      if (nwritten > 0)
+      {
         total_written += nwritten;
         __sz_w_bytes += nwritten;
 
@@ -1489,9 +1491,8 @@ iwrite_pmem (int fd, char const *buf, size_t size)
         }
         pm_patch_ibuf = NULL;
         pm_patch_obuf = NULL;
-        alloc_pmem_obuf();
       }
-    }
+    // }
 
   if (o_nocache && total_written)
     invalidate_cache (fd, total_written);
@@ -2446,8 +2447,8 @@ dd_copy (void)
     return exit_status;
 
   if(__SZ_ENABLED) {
-    alloc_pmem_ibuf ();
-    alloc_pmem_obuf ();
+    // alloc_pmem_ibuf ();
+    // alloc_pmem_obuf ();
   } else {
     alloc_ibuf ();
     alloc_obuf ();
@@ -2480,6 +2481,7 @@ dd_copy (void)
                 (conversions_mask & (C_BLOCK | C_UNBLOCK)) ? ' ' : '\0',
                 input_blocksize);
 
+      alloc_pmem_obuf();
       if (r_partial + r_full >= max_records)
         nread = iread_fnc (STDIN_FILENO, ibuf, max_bytes);
       else
