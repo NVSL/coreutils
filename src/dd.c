@@ -2693,7 +2693,7 @@ main (int argc, char **argv)
   off_t offset;
 
   if(__SZ_ENABLED){
-    int __sz_ret = __sz_create_pmem_pool_default();
+    int __sz_ret = __sz_create_pmem_pool("/mnt/ramdisk", 1 << 30, 4);
     if(__sz_ret != 0) {
       fprintf(stderr, "Error creating pmem_pool. Abort!\n");
       exit(-1);
